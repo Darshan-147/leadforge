@@ -3,7 +3,10 @@ import json
 import os
 import re
 import socket
-from collections import defaultdict
+from collections import defaultdict, deque
+from math import ceil
+from threading import Lock
+from time import monotonic
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse, urlunparse
@@ -21,6 +24,11 @@ from supabase import Client, ClientOptions, create_client
 
 from ddgs import DDGS
 from starlette.concurrency import run_in_threadpool
+
+import csv
+import io
+import uuid
+import boto3
 
 
 class Settings(BaseSettings):
@@ -84,6 +92,93 @@ async def require_user(
     if not user or not user.id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="The access token is invalid or expired.")
     return AuthenticatedUser(id=str(user.id), access_token=access_token)
+
+
+# In-memory rate limiter for a single backend process.
+# Keys are (operation name, authenticated user ID).
+_RATE_LIMIT_BUCKETS: dict[
+    tuple[str, str], tuple[int, deque[float]]
+] = {}
+
+_RATE_LIMIT_LOCK = Lock()
+_RATE_LIMIT_REQUEST_COUNT = 0
+
+
+def user_rate_limit(
+    scope: str,
+    limit: int,
+    window_seconds: int,
+):
+    async def enforce_limit(
+        user: AuthenticatedUser = Depends(require_user),
+    ) -> None:
+        global _RATE_LIMIT_REQUEST_COUNT
+
+        now = monotonic()
+        key = (scope, user.id)
+
+        with _RATE_LIMIT_LOCK:
+            bucket = _RATE_LIMIT_BUCKETS.get(key)
+
+            if bucket is None or bucket[0] != window_seconds:
+                timestamps: deque[float] = deque()
+                _RATE_LIMIT_BUCKETS[key] = (
+                    window_seconds,
+                    timestamps,
+                )
+            else:
+                timestamps = bucket[1]
+
+            # Remove requests outside the current time window.
+            while (
+                timestamps
+                and now - timestamps[0] >= window_seconds
+            ):
+                timestamps.popleft()
+
+            # Reject the request if the user has reached the limit.
+            if len(timestamps) >= limit:
+                retry_after = max(
+                    1,
+                    ceil(
+                        window_seconds
+                        - (now - timestamps[0])
+                    ),
+                )
+
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"Rate limit exceeded for {scope}. "
+                        f"Try again in {retry_after} seconds."
+                    ),
+                    headers={
+                        "Retry-After": str(retry_after)
+                    },
+                )
+
+            timestamps.append(now)
+            _RATE_LIMIT_REQUEST_COUNT += 1
+
+            # Periodically remove expired buckets for inactive users.
+            if _RATE_LIMIT_REQUEST_COUNT % 100 == 0:
+                for stale_key, (
+                    stale_window,
+                    stale_timestamps,
+                ) in list(_RATE_LIMIT_BUCKETS.items()):
+                    while (
+                        stale_timestamps
+                        and now - stale_timestamps[0]
+                        >= stale_window
+                    ):
+                        stale_timestamps.popleft()
+
+                    if not stale_timestamps:
+                        _RATE_LIMIT_BUCKETS.pop(
+                            stale_key, None
+                        )
+
+    return enforce_limit
 
 
 def get_user_db(user: AuthenticatedUser) -> Client:
@@ -789,7 +884,12 @@ async def fetch_html(client: httpx.AsyncClient, url: str) -> tuple[str, str] | N
 def health():
     return {"status": "ok", "service": "leadforge-api"}
 
-@app.post("/api/discover")
+@app.post(
+    "/api/discover",
+    dependencies=[
+        Depends(user_rate_limit("discover", 10, 60))
+    ],
+)
 async def discover_companies(request: DiscoverRequest, _user: AuthenticatedUser = Depends(require_user)):
     query_parts = [
         request.industry.strip(),
@@ -895,7 +995,12 @@ async def discover_companies(request: DiscoverRequest, _user: AuthenticatedUser 
     }
 
 
-@app.post("/api/scan")
+@app.post(
+    "/api/scan",
+    dependencies=[
+        Depends(user_rate_limit("scan", 5, 60))
+    ],
+)
 async def scan(request: ScanRequest, user: AuthenticatedUser = Depends(require_user)):
     start_url = normalized_url(str(request.url))
     start_domain = domain_of(start_url)
@@ -1033,7 +1138,12 @@ async def scan(request: ScanRequest, user: AuthenticatedUser = Depends(require_u
     return {"lead": saved, "pages_checked": len(visited), "hunter_verification": hunter_results, "message": "Lead saved or updated successfully."}
 
 
-@app.get("/api/leads")
+@app.get(
+    "/api/leads",
+    dependencies=[
+        Depends(user_rate_limit("leads", 60, 60))
+    ],
+)
 def list_leads(
     search: str = Query(default="", max_length=150),
     status: str = Query(default="all", pattern="^(all|new|reviewed|qualified|disqualified)$"),
@@ -1052,7 +1162,12 @@ def list_leads(
     return {"leads": result.data or []}
 
 
-@app.patch("/api/leads/{lead_id}/status")
+@app.patch(
+    "/api/leads/{lead_id}/status",
+    dependencies=[
+        Depends(user_rate_limit("status_update", 30, 60))
+    ],
+)
 def update_status(lead_id: str, request: StatusRequest, user: AuthenticatedUser = Depends(require_user)):
     require_owned_lead(lead_id, user)
     db = get_user_db(user)
@@ -1062,7 +1177,12 @@ def update_status(lead_id: str, request: StatusRequest, user: AuthenticatedUser 
     return {"lead": result.data[0]}
 
 
-@app.post("/api/leads/{lead_id}/validate")
+@app.post(
+    "/api/leads/{lead_id}/validate",
+    dependencies=[
+        Depends(user_rate_limit("validate", 10, 60))
+    ],
+)
 async def validate_lead(lead_id: str, user: AuthenticatedUser = Depends(require_user)):
     require_owned_lead(lead_id, user)
     db = get_user_db(user)
@@ -1093,7 +1213,12 @@ async def validate_lead(lead_id: str, user: AuthenticatedUser = Depends(require_
     }
 
 
-@app.get("/api/stats")
+@app.get(
+    "/api/stats",
+    dependencies=[
+        Depends(user_rate_limit("stats", 60, 60))
+    ],
+)
 def stats(user: AuthenticatedUser = Depends(require_user)):
     db = get_user_db(user)
     result = db.table("leads").select("id,lead_score,status,emails").limit(5000).execute()
@@ -1104,3 +1229,92 @@ def stats(user: AuthenticatedUser = Depends(require_user)):
         "with_email": sum(1 for r in rows if r.get("emails")),
         "high_score": sum(1 for r in rows if (r.get("lead_score") or 0) >= 70),
     }
+
+
+@app.get(
+    "/api/exports/leads",
+    dependencies=[
+        Depends(user_rate_limit("export", 3, 60))
+    ],
+)
+def export_leads_to_s3(
+    user: AuthenticatedUser = Depends(require_user),
+):
+    bucket = os.getenv("AWS_S3_BUCKET")
+    region = os.getenv("AWS_REGION", "ap-south-1")
+
+    if not bucket:
+        raise HTTPException(
+            status_code=503,
+            detail="AWS S3 export is not configured.",
+        )
+
+    # This client uses credentials from Render's environment.
+    s3 = boto3.client("s3", region_name=region)
+
+    # Use the authenticated user's Supabase client so RLS applies.
+    db = get_user_db(user)
+    result = (
+        db.table("leads")
+        .select(
+            "company_name,domain,website_url,emails,"
+            "phones,lead_score,status,created_at"
+        )
+        .order("created_at", desc=True)
+        .limit(500)
+        .execute()
+    )
+
+    fields = [
+        "company_name", "domain", "website_url",
+        "emails", "phones", "lead_score",
+        "status", "created_at",
+    ]
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+
+    for lead in result.data or []:
+        row = dict(lead)
+        for field in ("emails", "phones"):
+            value = row.get(field) or []
+            row[field] = "; ".join(map(str, value))
+        writer.writerow(row)
+
+    csv_bytes = output.getvalue().encode("utf-8-sig")
+    object_key = f"exports/{user.id}/{uuid.uuid4()}.csv"
+
+    try:
+        s3.put_object(
+            Bucket=bucket,
+            Key=object_key,
+            Body=csv_bytes,
+            ContentType="text/csv; charset=utf-8",
+            ServerSideEncryption="AES256",
+        )
+
+        # The link works temporarily; it does not make
+        # the S3 bucket public.
+        download_url = s3.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": bucket,
+                "Key": object_key,
+            },
+            ExpiresIn=300,
+        )
+    except Exception as exc:
+        # Log the underlying exception in server logs
+        # during debugging; don't expose credentials.
+        raise HTTPException(
+            status_code=502,
+            detail="Could not create the S3 export.",
+        ) from exc
+
+    return {
+        "download_url": download_url,
+        "expires_in_seconds": 300,
+        "rows_exported": len(result.data or []),
+    }
+

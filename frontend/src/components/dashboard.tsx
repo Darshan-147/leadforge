@@ -54,7 +54,7 @@ async function authenticatedFetch(input: string, init?: RequestInit) {
   return fetch(input, { ...init, headers });
 }
 
-function formatApiErrorDetail(detail: unknown): string | null {
+export function formatApiErrorDetail(detail: unknown): string | null {
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) {
     const messages = detail.map((item) => {
@@ -166,7 +166,7 @@ const CHALLENGE_COMPANY_TITLES = new Set([
   "attention required cloudflare",
 ]);
 
-function getCompanyDisplayName(companyName: string | null) {
+export function getCompanyDisplayName(companyName: string | null) {
   const normalized = (companyName || "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
@@ -186,7 +186,7 @@ const socialPlatformIcons: Record<string, LucideIcon> = {
   x: Twitter,
 };
 
-function getSocialPlatformIcon(platform: string) {
+export function getSocialPlatformIcon(platform: string) {
   const normalizedPlatform = platform.toLowerCase().replace(/[^a-z0-9]/g, "");
   return socialPlatformIcons[normalizedPlatform] ?? Globe;
 }
@@ -204,6 +204,7 @@ export default function Home() {
   const [status, setStatus] = useState("all");
   const [minScore, setMinScore] = useState("0");
   const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [validatingLeadId, setValidatingLeadId] = useState<string | null>(null);
 
@@ -472,36 +473,43 @@ export default function Home() {
   }
 
   const visibleLeads = useMemo(() => leads, [leads]);
-  function exportCsv() {
-    const columns = [
-      "company_name",
-      "domain",
-      "website_url",
-      "description",
-      "emails",
-      "phones",
-      "lead_score",
-      "status",
-    ];
-    const quote = (v: unknown) => `"${String(v ?? "").replaceAll('"', '""')}"`;
-    const csv = [
-      columns.join(","),
-      ...visibleLeads.map((lead) =>
-        columns
-          .map((key) => {
-            const value = (lead as unknown as Record<string, unknown>)[key];
-            return quote(Array.isArray(value) ? value.join("; ") : value);
-          })
-          .join(","),
-      ),
-    ].join("\r\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const href = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = href;
-    a.download = "leadforge-leads.csv";
-    a.click();
-    URL.revokeObjectURL(href);
+
+  async function exportCsv() {
+    setExporting(true);
+
+    try {
+      const response = await authenticatedFetch(`${API}/api/exports/leads`, {
+        method: "GET",
+      });
+
+      const data = (await response.json()) as {
+        detail?: string;
+        download_url?: string;
+        expires_in_seconds?: number;
+        rows_exported?: number;
+      };
+
+      if (!response.ok) {
+        throw new Error(data.detail || `Export failed (${response.status}).`);
+      }
+
+      if (!data.download_url) {
+        throw new Error("The API did not return a download URL.");
+      }
+
+      // Open the temporary S3 download URL.
+      window.location.assign(data.download_url);
+
+      toast.success(`Export ready: ${data.rows_exported ?? 0} lead(s).`);
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Could not export leads to AWS S3.",
+      );
+    } finally {
+      setExporting(false);
+    }
   }
 
   async function logout() {
@@ -835,11 +843,12 @@ export default function Home() {
               </p>
             </div>
             <button
-              onClick={exportCsv}
-              disabled={!visibleLeads.length}
+              onClick={() => void exportCsv()}
+              disabled={!visibleLeads.length || exporting}
               className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 px-4 text-sm font-semibold hover:bg-slate-50 disabled:opacity-40"
             >
-              <Download size={16} /> Export CSV
+              <Download size={16} />
+              {exporting ? "Exporting..." : "Export CSV"}
             </button>
           </div>
           <div className="grid gap-3 border-b border-slate-100 bg-slate-50/70 p-4 md:grid-cols-[1fr_180px_180px]">

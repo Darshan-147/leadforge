@@ -24,6 +24,7 @@ next-env.d.ts
 
 # Testing
 /coverage/
+**/coverage/
 
 # Deployment
 .vercel
