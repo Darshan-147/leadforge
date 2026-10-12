@@ -898,11 +898,72 @@ def extract_page(url: str, html: str) -> dict[str, Any]:
     text = soup.get_text(" ", strip=True)
     emails = set(re.findall(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", html + " " + text))
     emails = {e.lower().strip(".,;:") for e in emails if not e.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".svg"))}
+
+    
     phones = set()
-    for candidate in re.findall(r"(?<!\w)(?:\+?\d[\d\s().-]{7,}\d)(?!\w)", text):
+
+    # Exclude common year ranges and dates before phone extraction.
+    date_or_year_range_pattern = re.compile(
+        r"\b(?:19|20)\d{2}\s*[-–—]\s*(?:19|20)\d{2}\b|"
+        r"\b(?:19|20)\d{2}\s*[./-]\s*(?:0?[1-9]|1[0-2])"
+        r"\s*[./-]\s*(?:0?[1-9]|[12]\d|3[01])\b|"
+        r"\b(?:0?[1-9]|[12]\d|3[01])\s*[./-]\s*"
+        r"(?:0?[1-9]|1[0-2])\s*[./-]\s*(?:19|20)?\d{2}\b"
+    )
+
+    # Remove common date formats and year ranges from searchable text.
+    phone_source_text = date_or_year_range_pattern.sub(" ", text)
+
+    # Extract likely phone numbers from the remaining text.
+    phone_candidate_pattern = re.compile(
+        r"(?<!\w)\+?\d[\d\s()./–—-]{7,}\d(?!\w)"
+    )
+
+    for match in phone_candidate_pattern.finditer(phone_source_text):
+        candidate = match.group().strip()
         digits = re.sub(r"\D", "", candidate)
+
+        # Require 10+ digits unless a shorter number has nearby
+        # phone-related context, such as "Phone" or "Contact".
+        context = phone_source_text[
+            max(0, match.start() - 40):
+            min(len(phone_source_text), match.end() + 40)
+        ]
+
+        has_phone_label = bool(
+            re.search(
+                r"\b(?:phone|telephone|tel|mobile|call|contact|hotline|fax)\b",
+                context,
+                re.IGNORECASE,
+            )
+        )
+
+        if 10 <= len(digits) <= 15 or (
+            8 <= len(digits) <= 9 and has_phone_label
+        ):
+            phones.add(
+                re.sub(r"\s+", " ", candidate).strip()[:40]
+            )
+
+    # Prefer explicitly marked telephone links when available.
+    for anchor in soup.find_all("a", href=True):
+        href = anchor["href"].strip()
+
+        if not href.lower().startswith("tel:"):
+            continue
+
+        candidate = href[4:].split("?")[0].strip()
+
+        if date_or_year_range_pattern.fullmatch(candidate):
+            continue
+
+        digits = re.sub(r"\D", "", candidate)
+
         if 8 <= len(digits) <= 15:
-            phones.add(re.sub(r"\s+", " ", candidate).strip()[:40])
+            phones.add(
+                re.sub(r"\s+", " ", candidate).strip()[:40]
+            )
+
 
     socials: dict[str, set[str]] = defaultdict(set)
     links = []
