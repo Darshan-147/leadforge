@@ -29,6 +29,7 @@ import csv
 import io
 import uuid
 import boto3
+import logging
 
 
 class Settings(BaseSettings):
@@ -48,6 +49,7 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+logger = logging.getLogger(__name__)
 app = FastAPI(title="LeadForge API", version="1.0.0",
               description="Bounded public-website lead discovery API.")
 
@@ -238,19 +240,97 @@ def domain_of(url: str) -> str:
     host = (urlparse(url).hostname or "").lower().rstrip(".")
     return host[4:] if host.startswith("www.") else host
 
-def search_web(query: str, limit: int, country: str):
-    """Search the web using the free DDGS metasearch library."""
-    region = f"{country.lower()}-en"
 
-    with DDGS() as ddgs:
-        return list(
-            ddgs.text(
-                query,
-                region=region,
-                safesearch="moderate",
-                max_results=limit,
+_DISCOVER_CACHE_TTL_SECONDS = 300
+_DISCOVER_CACHE_MAX_ENTRIES = 200
+_DISCOVER_CACHE: dict[
+    tuple[str, str, int],
+    tuple[float, list[dict[str, Any]]],
+] = {}
+
+_DISCOVER_CACHE_LOCK = Lock()
+_SEARCH_BACKOFF_UNTIL = 0.0
+_SEARCH_BACKOFF_SECONDS = 30
+
+
+def search_web(query: str, limit: int, country: str):
+    """Search the web with a short cache and provider-failure cooldown."""
+    global _SEARCH_BACKOFF_UNTIL
+
+    region = f"{country.lower()}-en"
+    cache_key = (query.strip().casefold(), region, int(limit))
+    now = monotonic()
+
+    with _DISCOVER_CACHE_LOCK:
+        # Avoid calling the provider while it's temporarily failing.
+        if now < _SEARCH_BACKOFF_UNTIL:
+            retry_after = max(
+                1, ceil(_SEARCH_BACKOFF_UNTIL - now)
             )
-        )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The free search provider is temporarily "
+                    f"unavailable. Try again in {retry_after} seconds."
+                ),
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        # Return cached results for identical recent searches.
+        cached = _DISCOVER_CACHE.get(cache_key)
+
+        if cached and now - cached[0] < _DISCOVER_CACHE_TTL_SECONDS:
+            return [dict(item) for item in cached[1]]
+
+        if cached:
+            _DISCOVER_CACHE.pop(cache_key, None)
+
+    try:
+        with DDGS(timeout=10) as ddgs:
+            results = list(
+                ddgs.text(
+                    query,
+                    region=region,
+                    safesearch="moderate",
+                    max_results=limit,
+                )
+            )
+    except Exception:
+        # Log the real exception on the backend; don't expose
+        # internal stack traces or provider details to the client.
+        logger.exception("Free web search provider failed")
+
+        with _DISCOVER_CACHE_LOCK:
+            _SEARCH_BACKOFF_UNTIL = max(
+                _SEARCH_BACKOFF_UNTIL,
+                monotonic() + _SEARCH_BACKOFF_SECONDS,
+            )
+
+        raise
+
+    with _DISCOVER_CACHE_LOCK:
+        _DISCOVER_CACHE[cache_key] = (monotonic(), results)
+
+        # Remove expired entries and keep the cache bounded.
+        now = monotonic()
+        expired_keys = [
+            key
+            for key, (timestamp, _) in _DISCOVER_CACHE.items()
+            if now - timestamp >= _DISCOVER_CACHE_TTL_SECONDS
+        ]
+
+        for key in expired_keys:
+            _DISCOVER_CACHE.pop(key, None)
+
+        while len(_DISCOVER_CACHE) > _DISCOVER_CACHE_MAX_ENTRIES:
+            oldest_key = min(
+                _DISCOVER_CACHE,
+                key=lambda key: _DISCOVER_CACHE[key][0],
+            )
+            _DISCOVER_CACHE.pop(oldest_key, None)
+
+    return [dict(item) for item in results]
+
 
 
 def score_lead(company_name: str | None, description: str | None,
@@ -912,13 +992,19 @@ async def discover_companies(request: DiscoverRequest, _user: AuthenticatedUser 
             request.limit,
             request.country,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
+        logger.exception("Discover endpoint failed during web search")
+
         raise HTTPException(
-            status_code=502,
+            status_code=503,
             detail=(
-                "Free web search failed or was rate-limited. "
-                "Wait and try again."
+                "The free web-search provider is temporarily "
+                "unavailable or rate-limited. Please wait at least "
+                "30 seconds before trying again."
             ),
+            headers={"Retry-After": "30"},
         ) from exc
 
     excluded_domains = {
