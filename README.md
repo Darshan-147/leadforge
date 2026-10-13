@@ -4,9 +4,16 @@ Discover, research, and export qualified B2B leads using automated web research.
 
 ## 🎥 Project Walkthrough
 
-[![Watch the LeadForge walkthrough](<img width="1892" height="898" alt="Leadforge video walkthrough" src="https://github.com/user-attachments/assets/c81ea92d-822f-42c8-bc1a-ce2ef5ae0d12" />)](https://drive.google.com/file/d/1nu_Mw5onq_dFlYxjQJ2W4pT-yPCZ3mtu/view)
+<a href="https://drive.google.com/file/d/1nu_Mw5onq_dFlYxjQJ2W4pT-yPCZ3mtu/view" target="_blank" rel="noopener noreferrer">
+  <img
+    src="https://github.com/user-attachments/assets/c81ea92d-822f-42c8-bc1a-ce2ef5ae0d12"
+    alt="LeadForge video walkthrough"
+    width="800"
+    height="380"
+  />
+</a>
 
-A short demonstration of LeadForge's core features, lead discovery workflow, and export functionality.
+A short demonstration of LeadForge's core features, lead discovery workflow, and export functionality. Click on the image to watch the video. Link may or may not open in a new tab, right click and open it in a new tab if you want this tab open.
 
 ## Architecture
 
