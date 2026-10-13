@@ -1,6 +1,16 @@
+# LeadForge — B2B Lead Generation & Research Platform
+
+Discover, research, and export qualified B2B leads using automated web research.
+
+## 🎥 Project Walkthrough
+
+[![Watch the LeadForge walkthrough](<img width="1892" height="898" alt="Leadforge video walkthrough" src="https://github.com/user-attachments/assets/c81ea92d-822f-42c8-bc1a-ce2ef5ae0d12" />)](https://drive.google.com/file/d/1nu_Mw5onq_dFlYxjQJ2W4pT-yPCZ3mtu/view)
+
+A short demonstration of LeadForge's core features, lead discovery workflow, and export functionality.
+
 ## Architecture
 
-LeadForge is a full-stack lead generation and research application. It combines a Next.js frontend, a FastAPI backend, Supabase authentication and PostgreSQL storage, and Amazon S3 for private CSV exports.
+LeadForge is a full-stack lead generation and research application. It combines a Next.js + React.js frontend, a FastAPI backend, Supabase authentication and PostgreSQL storage, and Amazon S3 for private CSV exports.
 
 ### System Architecture
 
