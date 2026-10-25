@@ -11,25 +11,20 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from main import (
-    AuthenticatedUser,
-    ScanRequest,
-    app,
-    build_lead_validation,
-    extract_page,
-    get_user_db,
+from api.routers.leads import list_leads
+from api.routers.scans import scan
+from api.routers.stats import stats
+from core.security import AuthenticatedUser, get_user_db
+from main import app
+from models.requests import ScanRequest
+from repositories.lead_repository import require_owned_lead
+from services.email_verification import (
     get_hunter_payload_status,
-    is_access_challenge_page,
-    list_leads,
-    require_owned_lead,
-    require_user,
-    scan,
-    score_company_name,
-    score_lead,
-    settings,
-    stats,
     verify_email_with_hunter,
 )
+from services.lead_scoring import score_company_name, score_lead
+from services.lead_validation import build_lead_validation
+from services.scanning_service import extract_page, is_access_challenge_page
 
 
 class CompanyNameExtractionTests(unittest.IsolatedAsyncioTestCase):
@@ -129,8 +124,8 @@ class CompanyNameExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(get_hunter_payload_status("do not send"), "accept_all")
         self.assertEqual(get_hunter_payload_status("unknown"), "unknown")
 
-    @mock.patch("main.settings")
-    @mock.patch("main.httpx.AsyncClient")
+    @mock.patch("services.email_verification.settings")
+    @mock.patch("services.email_verification.httpx.AsyncClient")
     async def test_verify_email_with_hunter_uses_cache_and_success_response(self, mock_client, mock_settings):
         mock_db = mock.Mock()
         mock_db.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = [{
@@ -150,8 +145,8 @@ class CompanyNameExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["email"], "alice@example.com")
         self.assertEqual(result["score"], 72)
 
-    @mock.patch("main.settings")
-    @mock.patch("main.httpx.AsyncClient")
+    @mock.patch("services.email_verification.settings")
+    @mock.patch("services.email_verification.httpx.AsyncClient")
     async def test_verify_email_with_hunter_handles_missing_key_and_invalid_credentials(self, mock_client, mock_settings):
         mock_db = mock.Mock()
         mock_db.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = []
@@ -170,8 +165,8 @@ class CompanyNameExtractionTests(unittest.IsolatedAsyncioTestCase):
         result = await verify_email_with_hunter(mock_db, "still@example.com")
         self.assertEqual(result["status"], "credentials_invalid")
 
-    @mock.patch("main.settings")
-    @mock.patch("main.httpx.AsyncClient")
+    @mock.patch("services.email_verification.settings")
+    @mock.patch("services.email_verification.httpx.AsyncClient")
     async def test_verify_email_with_hunter_handles_rate_limits_and_timeouts(self, mock_client, mock_settings):
         mock_db = mock.Mock()
         mock_db.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = []
@@ -192,9 +187,12 @@ class CompanyNameExtractionTests(unittest.IsolatedAsyncioTestCase):
         result = await verify_email_with_hunter(mock_db, "timeout@example.com")
         self.assertEqual(result["status"], "verification_unavailable")
 
-    @mock.patch("main.get_db")
-    @mock.patch("main.httpx.AsyncClient")
-    @mock.patch("main.normalized_url", return_value="https://example.com/")
+    @mock.patch("api.routers.scans.get_db")
+    @mock.patch("services.scanning_service.httpx.AsyncClient")
+    @mock.patch(
+        "services.scanning_service.normalized_url",
+        return_value="https://example.com/",
+    )
     async def test_scan_rejects_an_antibot_page_without_saving_a_lead(
         self, mock_normalized_url, mock_client, mock_get_db
     ):
@@ -239,7 +237,7 @@ class AuthenticationAndOwnershipTests(unittest.TestCase):
             401,
         )
 
-    @mock.patch("main.settings")
+    @mock.patch("core.security.settings")
     def test_request_scoped_client_uses_the_verified_access_token(self, mock_settings):
         mock_settings.supabase_url = "https://example.supabase.co"
         mock_settings.supabase_publishable_key = "publishable-test-key"
@@ -248,20 +246,18 @@ class AuthenticationAndOwnershipTests(unittest.TestCase):
 
         self.assertEqual(client.options.headers["Authorization"], "Bearer token-a")
 
-    @mock.patch("main.get_db")
-    def test_other_user_cannot_update_a_lead(self, mock_get_db):
+    def test_other_user_cannot_update_a_lead(self):
         service_db = mock.Mock()
         service_db.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
             {"id": "lead-a", "user_id": "user-a"}
         ]
-        mock_get_db.return_value = service_db
 
         with self.assertRaises(HTTPException) as raised:
-            require_owned_lead("lead-a", AuthenticatedUser(id="user-b", access_token="token-b"))
+            require_owned_lead(service_db, "lead-a", "user-b")
 
         self.assertEqual(raised.exception.status_code, 403)
 
-    @mock.patch("main.get_user_db")
+    @mock.patch("api.routers.leads.get_user_db")
     def test_authenticated_list_uses_the_request_users_rls_client(self, mock_get_user_db):
         user_db = mock.Mock()
         user_db.table.return_value.select.return_value.gte.return_value.order.return_value.limit.return_value.execute.return_value.data = [
@@ -275,7 +271,7 @@ class AuthenticationAndOwnershipTests(unittest.TestCase):
         self.assertEqual(result["leads"][0]["user_id"], "user-a")
         mock_get_user_db.assert_called_once_with(user)
 
-    @mock.patch("main.get_user_db")
+    @mock.patch("api.routers.stats.get_user_db")
     def test_dashboard_stats_use_only_rows_returned_by_the_users_rls_client(self, mock_get_user_db):
         user_db = mock.Mock()
         user_db.table.return_value.select.return_value.limit.return_value.execute.return_value.data = [
@@ -296,13 +292,22 @@ class AuthenticationAndOwnershipTests(unittest.TestCase):
 
 
 class LeadRescanOwnershipTests(unittest.IsolatedAsyncioTestCase):
-    @mock.patch("main.build_lead_validation", new_callable=mock.AsyncMock)
-    @mock.patch("main.verify_email_with_hunter", new_callable=mock.AsyncMock)
-    @mock.patch("main.get_db")
-    @mock.patch("main.get_user_db")
-    @mock.patch("main.fetch_html", new_callable=mock.AsyncMock)
-    @mock.patch("main.httpx.AsyncClient")
-    @mock.patch("main.normalized_url", return_value="https://example.com/")
+    @mock.patch(
+        "services.scanning_service.build_lead_validation",
+        new_callable=mock.AsyncMock,
+    )
+    @mock.patch(
+        "services.scanning_service.verify_email_with_hunter",
+        new_callable=mock.AsyncMock,
+    )
+    @mock.patch("api.routers.scans.get_db")
+    @mock.patch("api.routers.scans.get_user_db")
+    @mock.patch("services.scanning_service.fetch_html", new_callable=mock.AsyncMock)
+    @mock.patch("services.scanning_service.httpx.AsyncClient")
+    @mock.patch(
+        "services.scanning_service.normalized_url",
+        return_value="https://example.com/",
+    )
     async def test_rescan_keeps_the_same_users_qualified_status(
         self, _normalized_url, mock_client, mock_fetch_html, mock_get_user_db, mock_get_db,
         _verify_hunter, mock_build_validation,
@@ -343,8 +348,11 @@ class LeadRescanOwnershipTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AutomaticValidationTests(unittest.IsolatedAsyncioTestCase):
-    @mock.patch("main.validate_lead_emails")
-    @mock.patch("main.validate_website_reachability", new_callable=mock.AsyncMock)
+    @mock.patch("services.lead_validation.validate_lead_emails")
+    @mock.patch(
+        "services.lead_validation.validate_website_reachability",
+        new_callable=mock.AsyncMock,
+    )
     async def test_automatic_validation_marks_a_reachable_lead_as_passed(
         self, mock_website_check, mock_email_checks
     ):
