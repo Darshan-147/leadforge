@@ -2,13 +2,12 @@
 
 import csv
 import io
-import os
 import uuid
 
 import boto3
 from fastapi import HTTPException
 from supabase import Client
-
+from core.config import settings
 from repositories.lead_repository import exportable_leads
 
 
@@ -17,8 +16,8 @@ def export_leads_csv_to_s3(db: Client, user_id: str) -> dict:
 
     Returns a dict with download_url, expires_in_seconds, and rows_exported.
     """
-    bucket = os.getenv("AWS_S3_BUCKET")
-    region = os.getenv("AWS_REGION", "ap-south-1")
+    bucket = settings.aws_s3_bucket
+    region = settings.aws_region
 
     if not bucket:
         raise HTTPException(
@@ -26,8 +25,21 @@ def export_leads_csv_to_s3(db: Client, user_id: str) -> dict:
             detail="AWS S3 export is not configured.",
         )
 
-    # This client uses credentials from Render's environment.
-    s3 = boto3.client("s3", region_name=region)
+    # Use explicit credentials when configured; otherwise, boto3 falls back to its default credential chain.
+    aws_credentials = {}
+
+    if settings.aws_access_key_id and settings.aws_secret_access_key:
+        aws_credentials = {
+        "aws_access_key_id": settings.aws_access_key_id,
+        "aws_secret_access_key": settings.aws_secret_access_key,
+    }
+
+    s3 = boto3.client(
+        "s3",
+        region_name=region,
+        **aws_credentials,
+)
+
 
     # Use the authenticated user's Supabase client so RLS applies.
     leads = exportable_leads(db)
@@ -61,8 +73,7 @@ def export_leads_csv_to_s3(db: Client, user_id: str) -> dict:
             ServerSideEncryption="AES256",
         )
 
-        # The link works temporarily; it does not make
-        # the S3 bucket public.
+        # The link works temporarily; it does not make the S3 bucket public.
         download_url = s3.generate_presigned_url(
             "get_object",
             Params={
@@ -72,8 +83,7 @@ def export_leads_csv_to_s3(db: Client, user_id: str) -> dict:
             ExpiresIn=300,
         )
     except Exception as exc:
-        # Log the underlying exception in server logs
-        # during debugging; don't expose credentials.
+        # Log the underlying exception in server logs during debugging; don't expose credentials.
         raise HTTPException(
             status_code=502,
             detail="Could not create the S3 export.",
