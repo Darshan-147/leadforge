@@ -271,8 +271,6 @@ The frontend separates Next.js routes, reusable UI components, Supabase clients,
 
 The database/ directory contains the base PostgreSQL schema, incremental migrations, and database documentation.
 
-```
-
 ### Deployment Architecture
 
 - **Vercel:** Deploys the `frontend` directory and supplies the public API URL and public Supabase configuration through environment variables.
