@@ -178,27 +178,99 @@ Protected endpoints require a valid Supabase access token. The `/health` endpoin
 leadforge/
 ├── frontend/
 │   ├── src/
-│   │   ├── app/                 # Next.js routes and pages
-│   │   ├── components/          # Dashboard and UI components
-│   │   ├── lib/                 # Supabase clients and shared utilities
-│   │   └── test/                # Frontend tests
-│   ├── .env.example             # Frontend environment template
-│   └── README.md                # Frontend setup and documentation
+│   │   ├── app/
+│   │   │   ├── api/
+│   │   │   │   └── validate-email-domain/
+│   │   │   │       └── route.ts
+│   │   │   ├── dashboard/
+│   │   │   │   └── page.tsx
+│   │   │   ├── login/
+│   │   │   │   ├── page.tsx
+│   │   │   │   └── page.test.tsx
+│   │   │   ├── signup/
+│   │   │   │   └── page.tsx
+│   │   │   ├── globals.css
+│   │   │   ├── layout.tsx
+│   │   │   └── page.tsx
+│   │   ├── components/
+│   │   │   ├── ui/                  # Reusable UI components
+│   │   │   ├── auth-shell.tsx
+│   │   │   ├── dashboard.tsx
+│   │   │   └── dashboard.test.tsx
+│   │   ├── lib/
+│   │   │   ├── supabase/
+│   │   │   │   ├── client.ts
+│   │   │   │   └── server.ts
+│   │   │   └── utils.ts
+│   │   ├── test/
+│   │   │   └── setup.ts
+│   │   └── middleware.ts
+│   ├── .env.example
+│   ├── package.json
+│   ├── package-lock.json
+│   ├── next.config.ts
+│   ├── vitest.config.ts
+│   └── README.md
 │
 ├── backend/
-│   ├── main.py                  # FastAPI app, routes and business logic
-│   ├── api/                     # API
-│   ├── tests/                   # Backend tests
-│   ├── requirements.txt         # Runtime dependencies
-│   ├── .env.example             # Backend environment template
-│   └── README.md                # Backend setup and documentation
+│   ├── api/
+│   │   ├── routers/
+│   │   │   ├── discovery.py
+│   │   │   ├── exports.py
+│   │   │   ├── health.py
+│   │   │   ├── leads.py
+│   │   │   ├── scans.py
+│   │   │   ├── stats.py
+│   │   │   └── validation.py
+│   │   └── index.py                # Vercel adapter entry point
+│   ├── core/
+│   │   ├── config.py               # Settings and logging
+│   │   ├── rate_limiter.py         # Request rate limiting
+│   │   └── security.py             # Authentication and authorization
+│   ├── models/
+│   │   └── requests.py              # Request schemas
+│   ├── repositories/
+│   │   ├── email_cache_repository.py
+│   │   └── lead_repository.py
+│   ├── services/
+│   │   ├── discovery_service.py
+│   │   ├── email_verification.py
+│   │   ├── export_service.py
+│   │   ├── lead_scoring.py
+│   │   ├── lead_validation.py
+│   │   └── scanning_service.py
+│   ├── tests/
+│   │   ├── test_application_structure.py
+│   │   ├── test_company_name.py
+│   │   └── test_core_behaviors.py
+│   ├── utils/
+│   │   └── url_utils.py             # URL safety and normalization
+│   ├── main.py                      # FastAPI application entry point
+│   ├── requirements.txt
+│   ├── requirements-dev.txt
+│   ├── .env.example
+│   ├── .coveragerc
+│   ├── vercel.json
+│   └── README.md
 │
 ├── database/
-│   ├── schema.sql               # Supabase database schema
-│   ├── migrations/              # Database migrations
-│   └── README.md                # Database setup and documentation
+│   ├── schema.sql
+│   ├── migrations/
+│   │   ├── 002_lead_validation.sql
+│   │   ├── 003_hunter_email_verification.sql
+│   │   └── 005_add_lead_ownership.sql
+│   └── README.md
 │
-└── README.md                    # Project overview and architecture
+├── .gitignore
+└── README.md
+```
+
+The backend follows a modular architecture: API routers handle HTTP requests, services implement business workflows, repositories isolate database operations, and core modules manage configuration, security, and rate limiting. Shared URL-processing helpers live in `utils/`.
+
+The frontend separates Next.js routes, reusable UI components, Supabase clients, and test setup into dedicated directories.
+
+The database/ directory contains the base PostgreSQL schema, incremental migrations, and database documentation.
+
 ```
 
 ### Deployment Architecture
