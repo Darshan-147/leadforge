@@ -11,24 +11,25 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from main import (
-    AuthenticatedUser,
-    DiscoverRequest,
-    app,
-    compute_data_quality_score,
-    discover_companies,
-    domain_of,
-    fetch_html,
-    normalized_url,
+from api.routers.discovery import discover_companies
+from core.security import AuthenticatedUser
+from main import app
+from models.requests import DiscoverRequest
+from services.email_verification import (
     validate_email_domain,
     validate_lead_emails,
+)
+from services.lead_validation import (
+    compute_data_quality_score,
     validate_website_reachability,
 )
+from services.scanning_service import fetch_html
+from utils.url_utils import domain_of, normalized_url
 
 
 class UrlSafetyTests(unittest.TestCase):
     def test_normalized_url_removes_fragment_and_keeps_query(self):
-        with mock.patch("main.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("8.8.8.8", 443))]):
+        with mock.patch("utils.url_utils.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("8.8.8.8", 443))]):
             self.assertEqual(
                 normalized_url("https://WWW.Example.com/path?q=one#section"),
                 "https://WWW.Example.com/path?q=one",
@@ -38,11 +39,11 @@ class UrlSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(HTTPException, "hostname is not allowed"):
             normalized_url("http://localhost/admin")
 
-        with mock.patch("main.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("127.0.0.1", 80))]):
+        with mock.patch("utils.url_utils.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("127.0.0.1", 80))]):
             with self.assertRaisesRegex(HTTPException, "Private or non-public"):
                 normalized_url("http://example.test")
 
-        with mock.patch("main.socket.getaddrinfo", side_effect=OSError):
+        with mock.patch("utils.url_utils.socket.getaddrinfo", side_effect=OSError):
             with self.assertRaisesRegex(HTTPException, "could not be resolved"):
                 normalized_url("https://missing.example")
 
@@ -53,18 +54,18 @@ class UrlSafetyTests(unittest.TestCase):
 class ValidationTests(unittest.TestCase):
     def test_validate_email_domain_reports_dns_outcomes(self):
         record = mock.Mock(preference=10, exchange="mail.example.com.")
-        with mock.patch("main.dns.resolver.resolve", return_value=[record]):
+        with mock.patch("services.email_verification.dns.resolver.resolve", return_value=[record]):
             found = validate_email_domain("Example.com.")
         self.assertEqual(found["status"], "found")
         self.assertEqual(found["records"], [(10, "mail.example.com")])
 
-        with mock.patch("main.dns.resolver.resolve", side_effect=dns.resolver.NXDOMAIN):
+        with mock.patch("services.email_verification.dns.resolver.resolve", side_effect=dns.resolver.NXDOMAIN):
             self.assertEqual(validate_email_domain("missing.example")["status"], "domain_not_found")
 
-        with mock.patch("main.dns.resolver.resolve", side_effect=dns.exception.Timeout):
+        with mock.patch("services.email_verification.dns.resolver.resolve", side_effect=dns.exception.Timeout):
             self.assertEqual(validate_email_domain("slow.example")["status"], "lookup_error")
 
-    @mock.patch("main.validate_email_domain")
+    @mock.patch("services.email_verification.validate_email_domain")
     def test_email_validation_skips_duplicate_domain_and_retains_invalid_address(self, mock_domain):
         mock_domain.return_value = {"status": "found", "reason": "MX records were found.", "records": []}
         results = validate_lead_emails(["hello@example.com", "team@example.com", "invalid-address"])
@@ -90,8 +91,8 @@ class ValidationTests(unittest.TestCase):
 
 
 class HttpValidationTests(unittest.IsolatedAsyncioTestCase):
-    @mock.patch("main.normalized_url", side_effect=lambda url: url)
-    @mock.patch("main.httpx.AsyncClient")
+    @mock.patch("services.lead_validation.normalized_url", side_effect=lambda url: url)
+    @mock.patch("services.lead_validation.httpx.AsyncClient")
     async def test_website_validation_follows_safe_redirect(self, mock_client, _normalized):
         redirect = mock.Mock(is_redirect=True, status_code=302, headers={"location": "/about"}, content=b"")
         response = mock.Mock(is_redirect=False, status_code=200, headers={"content-type": "text/html"}, content=b"<html></html>")
@@ -106,8 +107,8 @@ class HttpValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "reachable")
         self.assertEqual(result["final_url"], "https://example.com/about")
 
-    @mock.patch("main.normalized_url", side_effect=lambda url: url)
-    @mock.patch("main.httpx.AsyncClient")
+    @mock.patch("services.lead_validation.normalized_url", side_effect=lambda url: url)
+    @mock.patch("services.lead_validation.httpx.AsyncClient")
     async def test_website_validation_rejects_non_html_and_http_errors(self, mock_client, _normalized):
         pdf = mock.Mock(is_redirect=False, status_code=200, headers={"content-type": "application/pdf"}, content=b"pdf")
         client = mock.AsyncMock()
@@ -121,7 +122,7 @@ class HttpValidationTests(unittest.IsolatedAsyncioTestCase):
         client.get.return_value = server_error
         self.assertEqual((await validate_website_reachability("https://example.com"))["status"], "http_error")
 
-    @mock.patch("main.normalized_url", side_effect=lambda url: url)
+    @mock.patch("services.scanning_service.normalized_url", side_effect=lambda url: url)
     async def test_fetch_html_ignores_non_html_and_network_failures(self, _normalized):
         non_html = mock.Mock(status_code=200, headers={"content-type": "application/pdf"}, content=b"pdf", text="pdf")
         non_html.raise_for_status.return_value = None
@@ -134,7 +135,7 @@ class HttpValidationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DiscoveryEndpointTests(unittest.IsolatedAsyncioTestCase):
-    @mock.patch("main.run_in_threadpool")
+    @mock.patch("services.discovery_service.run_in_threadpool")
     async def test_discovery_filters_duplicates_social_sites_and_query_noise(self, mock_threadpool):
         mock_threadpool.return_value = [
             {"href": "https://linkedin.com/company/acme", "title": "Acme", "body": "skip"},
